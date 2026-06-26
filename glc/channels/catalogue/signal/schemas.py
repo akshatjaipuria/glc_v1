@@ -36,3 +36,20 @@ class SignalReceiveNotification(BaseModel):
     model_config = ConfigDict(extra="ignore")
     method: str | None = None
     params: ReceiveParams | None = None
+
+
+class SendParams(BaseModel):
+    """Parses the JSON-RPC params for a send request."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    message: str
+    recipient: str | None = None
+    group_id: str | None = Field(default=None, alias="groupId")
+
+
+class SignalSendRequest(BaseModel):
+    """Root level payload for outgoing JSON-RPC."""
+    model_config = ConfigDict(extra="ignore")
+    jsonrpc: str = "2.0"
+    id: str
+    method: str = "send"
+    params: SendParams

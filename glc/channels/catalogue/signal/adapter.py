@@ -7,11 +7,16 @@ for the standard workflow.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from glc.channels.base import ChannelAdapter
-from glc.channels.catalogue.signal.schemas import SignalReceiveNotification
+from glc.channels.catalogue.signal.schemas import (
+    SendParams,
+    SignalReceiveNotification,
+    SignalSendRequest,
+)
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
@@ -89,7 +94,15 @@ class Adapter(ChannelAdapter):
         return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
 
     async def send(self, reply: ChannelReply) -> Any:
-        raise NotImplementedError(
-            "Group assignment: implement on_message and send. "
-            "See docs/ADAPTER_GUIDE.md and glc/channels/catalogue/signal/README.md."
+        params = SendParams(
+            message=reply.text or "",
+            recipient=reply.channel_user_id if not reply.thread_id else None,
+            group_id=reply.thread_id if reply.thread_id else None,
         )
+        request = SignalSendRequest(id=uuid.uuid4().hex, params=params)
+        payload = request.model_dump(by_alias=True, exclude_none=True)
+
+        mock = self.config.get("mock")
+        if mock is not None:
+            return await mock.send(payload)
+        return payload
