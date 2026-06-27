@@ -16,10 +16,20 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from glc.channels.base import ChannelAdapter
+from glc.channels.catalogue.signal.schemas import (
+    SendParams,
+    SignalReceiveNotification,
+    SignalSendRequest,
+)
 from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.security.allowlists import allowed
+from glc.security.pairing import get_pairing_store
+from glc.security.trust_level import classify
+from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
 from glc.channels.catalogue.signal.schemas import (
     SendParams,
@@ -31,63 +41,81 @@ from glc.channels.catalogue.signal.schemas import (
 class Adapter(ChannelAdapter):
     name = "signal"
 
-    async def on_message(self, raw: Any) -> ChannelMessage:
+    async def on_message(self, raw: Any) -> ChannelMessage | None:
+        # signal-cli can drop the JSON-RPC socket; the mock signals this via
+        # pop_disconnect(). Acknowledge the reconnect and keep processing the
+        # event instead of raising.
         mock = self.config.get("mock")
-
-        # Safe disconnect handling — not all client objects expose pop_disconnect.
-        pop = getattr(mock, "pop_disconnect", None)
-        if pop and pop():
-            pass  # real impl would close + reopen the socket here
-
-        # Skip notifications that are not inbound data messages
-        # (typing indicators, read receipts, sync events, etc.)
-        if raw.get("method") != "receive":
-            return None  # type: ignore[return-value]
+        if mock is not None and hasattr(mock, "pop_disconnect"):
+            mock.pop_disconnect()
 
         notification = SignalReceiveNotification.model_validate(raw)
         params = notification.params
         envelope = params.envelope if params else None
+        if envelope is None or not envelope.source:
+            return None
 
-        if envelope is None:
-            return None  # type: ignore[return-value]
-
-        source = envelope.source or ""
-        if not source:
-            return None  # type: ignore[return-value]
-
-        source_name = envelope.source_name or ""
-        timestamp_ms = envelope.timestamp or 0
+        channel_user_id = envelope.source
         data_message = envelope.data_message
+        text = data_message.message if data_message else None
 
-        # Envelopes without dataMessage carry no text (receipts, call events).
-        if data_message is None:
-            return None  # type: ignore[return-value]
+        group_id: str | None = None
+        if data_message and data_message.group_info:
+            group_id = data_message.group_info.group_id
 
-        # Normalise empty string to None so callers can use `if msg.text`.
-        text = data_message.message or None
-        group_id = data_message.group_info.group_id if data_message.group_info else None
+        trust_level = classify(self.name, channel_user_id)
 
-        # Use UTC now as fallback when timestamp is absent or zero.
-        arrived_at = (
-            datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
-            if timestamp_ms
-            else datetime.now(tz=timezone.utc)
-        )
+        # In public channels the default posture is owner-/allowlist-only.
+        # Consult the allowlist before surfacing strangers; silently drop
+        # senders who are not permitted.
+        if self.config.get("is_public_channel"):
+            owner_ids = [rec.channel_user_id for rec in get_pairing_store().owners(self.name)]
+            ok, _reason = allowed(
+                self.name,
+                channel_user_id,
+                owner_ids=owner_ids,
+                is_public_channel=True,
+            )
+            if not ok:
+                return None
 
-        trust = classify("signal", source)
+        arrived_at = self._arrived_at(envelope, data_message)
 
         metadata: dict[str, Any] = {}
         if group_id:
             metadata["signal_group_id"] = group_id
 
         return ChannelMessage(
-            channel="signal",
-            channel_user_id=source,
-            user_handle=source_name,
+            channel=self.name,
+            channel_user_id=channel_user_id,
+            user_handle=envelope.source_name or channel_user_id,
             text=text,
-            trust_level=trust,
+            thread_id=group_id,
+            trust_level=trust_level,
             arrived_at=arrived_at,
             metadata=metadata,
+        )
+
+    @staticmethod
+    def _arrived_at(envelope: Any, data_message: Any) -> datetime:
+        # signal-cli timestamps are epoch milliseconds.
+        ts_ms = None
+        if data_message is not None and data_message.timestamp is not None:
+            ts_ms = data_message.timestamp
+        elif envelope is not None and envelope.timestamp is not None:
+            ts_ms = envelope.timestamp
+        if ts_ms is None:
+            return datetime.now(timezone.utc)
+        return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
+    async def send(self, reply: ChannelReply) -> Any:
+        params = SendParams(
+            message=reply.text or "",
+            recipient=reply.channel_user_id if not reply.thread_id else None,
+            group_id=reply.thread_id if reply.thread_id else None,
+        )
+        request = SignalSendRequest(id=uuid.uuid4().hex, params=params)
+            group_id=reply.thread_id if reply.thread_id else None
         )
 
     async def send(self, reply: ChannelReply) -> Any:
