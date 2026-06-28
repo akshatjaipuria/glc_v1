@@ -20,7 +20,9 @@ from typing import Any
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.catalogue.signal.schemas import (
+    DataMessage,
     SendParams,
+    SignalEnvelope,
     SignalReceiveNotification,
     SignalSendRequest,
 )
@@ -31,6 +33,8 @@ from glc.security.trust_level import classify
 
 
 class Adapter(ChannelAdapter):
+    """Translates between signal-cli JSON-RPC wire format and GLC envelopes."""
+
     name = "signal"
 
     async def on_message(self, raw: Any) -> ChannelMessage | None:
@@ -102,7 +106,7 @@ class Adapter(ChannelAdapter):
         )
 
     @staticmethod
-    def _arrived_at(envelope: Any, data_message: Any) -> datetime:
+    def _arrived_at(envelope: SignalEnvelope, data_message: DataMessage | None) -> datetime:
         # signal-cli timestamps are epoch milliseconds.
         ts_ms = None
         if data_message is not None and data_message.timestamp is not None:
