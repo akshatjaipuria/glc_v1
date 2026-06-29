@@ -37,7 +37,7 @@ class Adapter(ChannelAdapter):
 
     name = "signal"
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:
+    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
         # Reject non-dict payloads (e.g. bare strings from broken transports).
         if not isinstance(raw, dict):
             return None
